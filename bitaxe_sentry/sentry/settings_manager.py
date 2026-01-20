@@ -18,6 +18,7 @@ DEFAULT_SETTINGS = {
     "TEMP_MIN": 20,
     "TEMP_MAX": 70,
     "VOLT_MIN": 5.0,
+    "LATENCY_MAX_THRESHOLD": 500,
     "BITAXE_ENDPOINTS": [],
     "DISCORD_WEBHOOK_URL": ""
 }
@@ -54,10 +55,11 @@ def load_settings():
             settings["TEMP_MIN"] = float(settings["TEMP_MIN"])
             settings["TEMP_MAX"] = float(settings["TEMP_MAX"])
             settings["VOLT_MIN"] = float(settings["VOLT_MIN"])
+            settings["LATENCY_MAX_THRESHOLD"] = float(settings.get("LATENCY_MAX_THRESHOLD", DEFAULT_SETTINGS["LATENCY_MAX_THRESHOLD"]))
             
             # Log the converted values for debugging
             logger.info(f"Loaded settings - POLL_INTERVAL_MINUTES: {settings['POLL_INTERVAL_MINUTES']}, "
-                        f"VOLT_MIN: {settings['VOLT_MIN']}")
+                        f"VOLT_MIN: {settings['VOLT_MIN']}, LATENCY_MAX_THRESHOLD: {settings['LATENCY_MAX_THRESHOLD']}")
         except (ValueError, TypeError) as e:
             logger.error(f"Error converting settings values: {e}, using defaults")
             # Use defaults for any values that couldn't be converted
@@ -66,6 +68,7 @@ def load_settings():
             settings["TEMP_MIN"] = DEFAULT_SETTINGS["TEMP_MIN"]
             settings["TEMP_MAX"] = DEFAULT_SETTINGS["TEMP_MAX"]
             settings["VOLT_MIN"] = DEFAULT_SETTINGS["VOLT_MIN"]
+            settings["LATENCY_MAX_THRESHOLD"] = DEFAULT_SETTINGS["LATENCY_MAX_THRESHOLD"]
         
         return settings
     except Exception as e:
@@ -88,10 +91,11 @@ def save_settings(settings_dict):
         settings_dict["TEMP_MIN"] = float(settings_dict.get("TEMP_MIN", DEFAULT_SETTINGS["TEMP_MIN"]))
         settings_dict["TEMP_MAX"] = float(settings_dict.get("TEMP_MAX", DEFAULT_SETTINGS["TEMP_MAX"]))
         settings_dict["VOLT_MIN"] = float(settings_dict.get("VOLT_MIN", DEFAULT_SETTINGS["VOLT_MIN"]))
+        settings_dict["LATENCY_MAX_THRESHOLD"] = float(settings_dict.get("LATENCY_MAX_THRESHOLD", DEFAULT_SETTINGS["LATENCY_MAX_THRESHOLD"]))
         
         # Log the converted values for debugging
         logger.info(f"Saving settings - POLL_INTERVAL_MINUTES: {settings_dict['POLL_INTERVAL_MINUTES']}, "
-                    f"VOLT_MIN: {settings_dict['VOLT_MIN']}")
+                    f"VOLT_MIN: {settings_dict['VOLT_MIN']}, LATENCY_MAX_THRESHOLD: {settings_dict['LATENCY_MAX_THRESHOLD']}")
     except (ValueError, TypeError) as e:
         logger.error(f"Error converting settings values: {e}")
         return False

@@ -178,6 +178,11 @@ def history(
             error_percentage = reading.error_percentage if hasattr(reading, 'error_percentage') else 0.0
             if error_percentage is None:
                 error_percentage = 0.0
+            
+            # Ensure response_time has a default value if it's None
+            response_time = reading.response_time if hasattr(reading, 'response_time') else None
+            if response_time is None:
+                response_time = None
                 
             readings_by_miner[miner.name].append({
                 "timestamp": reading.timestamp.strftime("%H:%M:%S"),
@@ -186,7 +191,8 @@ def history(
                 "temperature": reading.temperature,
                 "best_diff": format_large_number(reading.best_diff),
                 "voltage": voltage,
-                "error_percentage": error_percentage
+                "error_percentage": error_percentage,
+                "response_time": response_time
             })
     
     # Pre-slice the data for different time windows
