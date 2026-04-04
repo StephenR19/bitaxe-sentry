@@ -115,7 +115,8 @@ def dashboard(request: Request, success: Optional[str] = None, error: Optional[s
     last_updated = most_recent_timestamp.strftime("%Y-%m-%d %H:%M:%S") if most_recent_timestamp else "Never"
     
     return templates.TemplateResponse(
-        "dashboard.html", 
+        request,
+        "dashboard.html",
         get_template_context(request, {
             "readings": latest_readings,
             "current_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -251,7 +252,8 @@ def history(
                 logger.info(f"Window {hours}h for {miner_name}: No data points")
     
     return templates.TemplateResponse(
-        "history.html", 
+        request,
+        "history.html",
         get_template_context(request, {
             "miners": miners,
             "selected_miner": selected_miner,
@@ -343,7 +345,7 @@ def settings_page(request: Request, success: Optional[str] = None, error: Option
         "error_message": error
     }
     
-    return templates.TemplateResponse("settings.html", get_template_context(request, context))
+    return templates.TemplateResponse(request, "settings.html", get_template_context(request, context))
 
 def notify_sentry_service():
     """Send SIGHUP signal to the sentry service to reload configuration"""
