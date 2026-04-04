@@ -16,6 +16,7 @@ RETENTION_DAYS = settings["RETENTION_DAYS"]
 TEMP_MIN = settings["TEMP_MIN"]
 TEMP_MAX = settings["TEMP_MAX"]
 VOLT_MIN = settings["VOLT_MIN"]
+LATENCY_MAX_THRESHOLD = settings["LATENCY_MAX_THRESHOLD"]
 
 # Process endpoints
 ENDPOINTS = []
@@ -55,7 +56,7 @@ last_modified_time = get_config_mtime()
 
 def reload_config():
     """Reload configuration from JSON config file if it has been modified"""
-    global POLL_INTERVAL, RETENTION_DAYS, TEMP_MIN, TEMP_MAX, VOLT_MIN, ENDPOINTS, DISCORD_WEBHOOK, last_modified_time
+    global POLL_INTERVAL, RETENTION_DAYS, TEMP_MIN, TEMP_MAX, VOLT_MIN, LATENCY_MAX_THRESHOLD, ENDPOINTS, DISCORD_WEBHOOK, last_modified_time
     
     # Check if the config file has been modified
     current_mtime = get_config_mtime()
@@ -74,6 +75,7 @@ def reload_config():
     TEMP_MIN = settings["TEMP_MIN"]
     TEMP_MAX = settings["TEMP_MAX"]
     VOLT_MIN = settings["VOLT_MIN"]
+    LATENCY_MAX_THRESHOLD = settings["LATENCY_MAX_THRESHOLD"]
     DISCORD_WEBHOOK = settings["DISCORD_WEBHOOK_URL"]
     
     # Process endpoints
@@ -94,6 +96,7 @@ def reload_config():
     logger.info(f"- Retention days: {RETENTION_DAYS}")
     logger.info(f"- Temperature range: {TEMP_MIN}°C - {TEMP_MAX}°C")
     logger.info(f"- Minimum voltage: {VOLT_MIN}V")
+    logger.info(f"- Maximum latency threshold: {LATENCY_MAX_THRESHOLD}ms")
     logger.info(f"- Endpoints: {ENDPOINTS}")
     
     # Log Discord webhook status
