@@ -143,10 +143,17 @@
             <input type="text" class="form-control" id="mac-input" placeholder="e.g. aa:bb:cc:dd:ee:ff, 11:22:33:44:55:66">
             <div class="form-text">Comma-separated MAC addresses to search for</div>
         </div>
+
+        <div class="form-check mb-3">
+            <input class="form-check-input" type="checkbox" id="auto-update-toggle" checked>
+            <label class="form-check-label" for="auto-update-toggle">
+                Automatically update IP for existing miners when found
+            </label>
+        </div>
         
         <div class="mb-3">
             <button type="button" class="btn btn-outline-primary" id="scan-btn">
-                <i class="bi bi-search"></i> Scan Network
+                <i class="bi bi-search" id="scan-btn-icon"></i> Scan Network
             </button>
             <span class="ms-2" id="scan-status"></span>
         </div>
@@ -279,10 +286,33 @@
             document.getElementById('all_endpoints').value = endpoints.join(',');
         }
         
+        // Find My Bitaxe - Load auto-update preference
+        var discoverAutoUpdate = {{ 'true' if settings.AUTO_UPDATE_MINER_IP else 'false' }};
+        document.getElementById('auto-update-toggle').checked = discoverAutoUpdate;
+        
+        // Find My Bitaxe - Toggle auto-update preference
+        document.getElementById('auto-update-toggle').addEventListener('change', function() {
+            var autoUpdate = this.checked;
+            fetch('/api/discover/preferences', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ auto_update: autoUpdate })
+            })
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                if (data.success) {
+                    console.log('Auto-update preference saved:', autoUpdate);
+                }
+            });
+        });
+        
         // Find My Bitaxe - Scan Network
         document.getElementById('scan-btn').addEventListener('click', function() {
             const macInput = document.getElementById('mac-input').value.trim();
             const statusSpan = document.getElementById('scan-status');
+            const scanBtn = document.getElementById('scan-btn');
+            const scanBtnIcon = document.getElementById('scan-btn-icon');
+            const autoUpdate = document.getElementById('auto-update-toggle').checked;
             
             if (!macInput) {
                 statusSpan.textContent = 'Please enter at least one MAC address';
@@ -297,24 +327,38 @@
                 return;
             }
             
-            statusSpan.textContent = 'Scanning... (this may take 30-60 seconds)';
+            // Show loading state
+            scanBtn.disabled = true;
+            scanBtnIcon.className = 'bi bi-arrow-repeat spin';
+            statusSpan.textContent = 'Scanning subnet...';
             statusSpan.className = 'text-muted';
             document.getElementById('scan-results').style.display = 'none';
             
             fetch('/api/discover', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ macs: macs })
+                body: JSON.stringify({ macs: macs, auto_update: autoUpdate })
             })
             .then(response => response.json())
             .then(data => {
+                // Reset button state
+                scanBtn.disabled = false;
+                scanBtnIcon.className = 'bi bi-search';
+                
                 if (!data.success) {
                     statusSpan.textContent = 'Error: ' + (data.error || 'Unknown error');
                     statusSpan.className = 'text-danger';
                     return;
                 }
                 
-                statusSpan.textContent = `Scan complete — found ${data.results.length} device(s) on ${data.subnet || 'network'}`;
+                const foundCount = data.results.filter(r => !r.error && r.ip).length;
+                const notFoundCount = data.results.filter(r => r.error === 'Not found on network').length;
+                
+                if (foundCount === 0 && notFoundCount > 0) {
+                    statusSpan.textContent = `Scan complete — no Bitaxes found on ${data.subnet || 'network'}`;
+                } else {
+                    statusSpan.textContent = `Scan complete — found ${foundCount} Bitaxe(s) on ${data.subnet || 'network'}`;
+                }
                 statusSpan.className = 'text-success';
                 
                 const tbody = document.getElementById('results-body');
@@ -329,13 +373,22 @@
                     if (r.error) {
                         statusBadge = `<span class="badge bg-danger">${r.error}</span>`;
                         actionBtn = '<span class="text-muted">—</span>';
-                    } else if (r.status === 'existing') {
-                        statusBadge = '<span class="badge bg-warning text-dark">Existing</span>';
-                        actionBtn = `<button class="btn btn-sm btn-outline-warning update-ip-btn" data-miner-id="${r.existing_miner_id}" data-ip="${r.ip}">Update IP</button>`;
-                    } else {
+                    } else if (r.action === 'new') {
                         statusBadge = '<span class="badge bg-success">New</span>';
                         const escapedMac = r.mac;
                         actionBtn = `<button class="btn btn-sm btn-outline-success add-miner-btn" data-mac="${escapedMac}" data-ip="${r.ip}" data-hostname="${r.hostname || ''}">Add Miner</button>`;
+                    } else if (r.action === 'auto_updated') {
+                        statusBadge = '<span class="badge bg-info">IP Auto-Updated</span>';
+                        actionBtn = '<span class="text-muted">✓</span>';
+                    } else if (r.action === 'ip_unchanged') {
+                        statusBadge = '<span class="badge bg-secondary">Unchanged</span>';
+                        actionBtn = '<span class="text-muted">—</span>';
+                    } else if (r.action === 'manual_update_needed') {
+                        statusBadge = '<span class="badge bg-warning text-dark">Update Needed</span>';
+                        actionBtn = `<button class="btn btn-sm btn-outline-warning update-ip-btn" data-miner-id="${r.existing_miner_id}" data-ip="${r.ip}">Update IP</button>`;
+                    } else {
+                        statusBadge = '<span class="badge bg-secondary">Unknown</span>';
+                        actionBtn = '<span class="text-muted">—</span>';
                     }
                     
                     tr.innerHTML = `
@@ -375,70 +428,40 @@
             const name = hostname || 'bitaxe_' + ip;
             const endpoint = 'http://' + ip;
             
-            // Add endpoint to the endpoints list
-            const container = document.getElementById('endpoints-container');
-            const newRow = document.createElement('div');
-            newRow.className = 'input-group mb-2 endpoint-row';
-            newRow.innerHTML = `
-                <input type="text" class="form-control endpoint-input" value="${endpoint}" placeholder="http://192.168.1.x">
-                <button type="button" class="btn btn-outline-danger remove-endpoint">
-                    <i class="bi bi-trash"></i>
-                </button>
-            `;
-            container.appendChild(newRow);
-            newRow.querySelector('.remove-endpoint').addEventListener('click', function() {
-                removeEndpoint(this);
-            });
-            updateEndpointsField();
-            
-            // Save settings to register the miner, then set its MAC
-            const formData = new FormData(document.querySelector('form'));
-            formData.set('BITAXE_ENDPOINTS', document.getElementById('all_endpoints').value);
-            
-            fetch('/settings', { method: 'POST', body: formData })
-            .then(function() {
-                // Now set the MAC address — we need the miner ID, so poll for it
-                return fetch('/api/miners');
+            // Create miner directly via API
+            fetch('/api/miners', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ endpoint: endpoint, name: name })
             })
             .then(function(resp) { return resp.json(); })
-            .catch(function() {
-                // Fallback: just show success message
-                alert('Miner added with endpoint ' + endpoint + '. MAC will be set on next poll.');
-            });
-            
-            // Set MAC via a separate call after a brief delay
-            setTimeout(function() {
-                setMacForIp(mac, ip);
-            }, 2000);
-        }
-        
-        function setMacForIp(mac, ip) {
-            fetch('/api/miners')
-            .then(function(resp) { return resp.json(); })
             .then(function(data) {
-                if (data.miners) {
-                    var miner = data.miners.find(function(m) { return m.endpoint === 'http://' + ip; });
-                    if (miner) {
-                        return fetch('/api/miners/' + miner.id + '/mac', {
-                            method: 'PUT',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ mac_address: mac })
-                        });
-                    }
+                if (data.success && data.miner_id) {
+                    // Immediately set the MAC address
+                    return fetch('/api/miners/' + data.miner_id + '/mac', {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ mac_address: mac })
+                    });
+                } else {
+                    alert('Miner already exists or failed to create');
                 }
             })
             .then(function(resp) { return resp ? resp.json() : null; })
             .then(function(data) {
                 if (data && data.success) {
-                    alert('Miner added and MAC address saved!');
+                    alert('Miner added with MAC address saved!');
+                    window.location.reload();
                 } else {
-                    alert('Miner added. MAC will be set on next poll.');
+                    alert('Miner added but failed to save MAC');
                 }
             })
-            .catch(function() {
-                alert('Miner added. MAC will be set on next poll.');
+            .catch(function(err) {
+                alert('Error adding miner: ' + err);
             });
         }
+        
+        function updateIp(minerId, newIp) {
         
         function updateIp(minerId, newIp) {
             if (!confirm('Update this miner\'s IP to ' + newIp + '?')) return;

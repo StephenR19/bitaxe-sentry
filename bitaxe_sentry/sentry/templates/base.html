@@ -158,6 +158,13 @@
             background-color: rgba(108,117,125,0.15);
             color: var(--text-color);
         }
+        .spin {
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
     </style>
     {% block head_extra %}{% endblock %}
 </head>

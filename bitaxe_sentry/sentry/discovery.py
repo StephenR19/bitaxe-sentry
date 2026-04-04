@@ -4,90 +4,52 @@ import re
 import socket
 import struct
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 logger = logging.getLogger(__name__)
 
 BITAXE_INDICATORS = ["bitaxeVersion", "hostname", "asicCount", "asicModel"]
 
-
 def normalize_mac(mac):
+    if not mac:
+        return None
     return mac.lower().replace("-", ":").strip()
 
 
-def get_arp_table():
-    entries = {}
+def parse_subnet_from_endpoints(endpoints):
+    """Extract subnet from configured endpoints. E.g. ['http://192.168.0.11'] -> '192.168.0.0/24'"""
+    if not endpoints:
+        return "192.168.1.0/24"
+    
+    ip_pattern = re.compile(r'(\d+\.\d+\.\d+\.)(\d+)')
+    for ep in endpoints:
+        match = ip_pattern.search(ep)
+        if match:
+            base = match.group(1)
+            return f"{base}0/24"
+    
+    return "192.168.1.0/24"
+
+
+def ping_host(ip, timeout=1):
+    """Check if a host is reachable via ping. Returns True if host responds."""
     try:
-        with open("/proc/net/arp", "r") as f:
-            lines = f.readlines()[1:]
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 4:
-                ip = parts[0]
-                mac = parts[3]
-                hw_type = parts[2]
-                if mac != "00:00:00:00:00:00" and hw_type == "0x1":
-                    entries[normalize_mac(mac)] = ip
-        if entries:
-            logger.info(f"Parsed {len(entries)} entries from /proc/net/arp")
-            return entries
-    except FileNotFoundError:
-        logger.debug("/proc/net/arp not available, trying fallback")
-    except Exception as e:
-        logger.warning(f"Error parsing /proc/net/arp: {e}")
-
-    return _parse_arp_command()
-
-
-def _parse_arp_command():
-    entries = {}
-    try:
-        result = subprocess.run(["arp", "-a"], capture_output=True, text=True, timeout=10)
-        for line in result.stdout.splitlines():
-            match = re.search(r'\((\d+\.\d+\.\d+\.\d+)\).*?([0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2}[:-][0-9a-fA-F]{2})', line)
-            if match:
-                ip = match.group(1)
-                mac = normalize_mac(match.group(2))
-                entries[mac] = ip
-        if entries:
-            logger.info(f"Parsed {len(entries)} entries from arp -a")
-    except Exception as e:
-        logger.warning(f"Error running arp -a: {e}")
-    return entries
-
-
-def get_local_subnet():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
+        result = subprocess.run(
+            ["ping", "-c", "1", "-W", str(timeout), ip],
+            capture_output=True,
+            timeout=timeout + 1
+        )
+        return result.returncode == 0
     except Exception:
-        local_ip = "192.168.1.1"
-
-    try:
-        result = subprocess.run(["ip", "-o", "addr", "show"], capture_output=True, text=True, timeout=10)
-        for line in result.stdout.splitlines():
-            if local_ip in line:
-                match = re.search(r'inet\s+(\d+\.\d+\.\d+\.\d+)/(\d+)', line)
-                if match:
-                    ip = match.group(1)
-                    prefix = int(match.group(2))
-                    packed_ip = struct.unpack("!I", socket.inet_aton(ip))[0]
-                    mask = (0xFFFFFFFF << (32 - prefix)) & 0xFFFFFFFF
-                    network = packed_ip & mask
-                    return f"{socket.inet_ntoa(struct.pack('!I', network))}/{prefix}", ip
-    except Exception:
-        pass
-
-    return "192.168.1.0/24", local_ip
+        return False
 
 
-def ping_sweep(subnet_cidr):
+def scan_subnet(subnet_cidr):
+    """Ping sweep the given subnet and return list of live IPs."""
     network, prefix_str = subnet_cidr.split("/")
     prefix = int(prefix_str)
     num_hosts = 2 ** (32 - prefix)
     if num_hosts > 256:
-        logger.warning(f"Subnet {subnet_cidr} has {num_hosts} hosts, limiting to 256")
         num_hosts = 256
 
     packed_net = struct.unpack("!I", socket.inet_aton(network))[0]
@@ -96,22 +58,21 @@ def ping_sweep(subnet_cidr):
         ip = socket.inet_ntoa(struct.pack("!I", packed_net | i))
         ips.append(ip)
 
-    logger.info(f"Pinging {len(ips)} hosts in {subnet_cidr}")
-    procs = []
-    for ip in ips:
-        try:
-            proc = subprocess.run(
-                ["ping", "-c", "1", "-W", "1", ip],
-                capture_output=True,
-                timeout=3
-            )
-        except Exception:
-            pass
+    logger.info(f"Ping sweeping {len(ips)} hosts in {subnet_cidr}")
 
-    logger.info("Ping sweep complete, ARP table should be populated")
+    live_ips = []
+    with ThreadPoolExecutor(max_workers=50) as executor:
+        futures = {executor.submit(ping_host, ip): ip for ip in ips}
+        for future in as_completed(futures):
+            if future.result():
+                live_ips.append(futures[future])
+
+    logger.info(f"Found {len(live_ips)} live hosts: {live_ips}")
+    return live_ips
 
 
 def verify_bitaxe(ip, timeout=5):
+    """Check if an IP is a Bitaxe by querying /api/system/info."""
     try:
         resp = requests.get(f"http://{ip}/api/system/info", timeout=timeout)
         resp.raise_for_status()
@@ -123,47 +84,74 @@ def verify_bitaxe(ip, timeout=5):
     return None
 
 
-def discover_by_macs(mac_list):
+def scan_bitaxes(live_ips):
+    """Given a list of live IPs, probe each for Bitaxe info. Returns dict keyed by IP."""
+    results = {}
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        futures = {executor.submit(verify_bitaxe, ip): ip for ip in live_ips}
+        for future in as_completed(futures):
+            ip = futures[future]
+            info = future.result()
+            if info:
+                results[ip] = info
+                logger.info(f"Found Bitaxe at {ip}: {info.get('hostname', '')} v{info.get('bitaxeVersion', '')}")
+    return results
+
+
+def discover_by_macs(mac_list, subnet=None, endpoints=None):
+    """Scan the given subnet for Bitaxes matching the provided MAC addresses.
+    
+    Args:
+        mac_list: List of MAC addresses to search for
+        subnet: Subnet to scan (e.g. '192.168.0.0/24'). Auto-detected if not provided.
+        endpoints: List of configured endpoints. Used to derive subnet if not explicitly provided.
+    
+    Returns:
+        Dict with 'results' list and 'subnet' scanned.
+    """
+    logger.info(f"=== DISCOVER BY MACS START ===")
+    logger.info(f"mac_list={mac_list}, subnet={subnet}, endpoints={endpoints}")
+    
     target_macs = {normalize_mac(m) for m in mac_list if m.strip()}
     if not target_macs:
+        logger.warning("No valid MAC addresses provided")
         return {"error": "No valid MAC addresses provided"}
 
-    logger.info(f"Scanning for MACs: {target_macs}")
+    if not subnet:
+        subnet = parse_subnet_from_endpoints(endpoints or [])
+    if isinstance(subnet, list):
+        subnet = parse_subnet_from_endpoints(subnet)
 
-    subnet, local_ip = get_local_subnet()
-    logger.info(f"Local subnet: {subnet}, local IP: {local_ip}")
+    logger.info(f"Target MACs: {target_macs}")
+    logger.info(f"Scanning subnet {subnet}")
 
-    ping_sweep(subnet)
+    logger.info("Step 1: Ping sweeping subnet...")
+    live_ips = scan_subnet(subnet)
+    logger.info(f"Step 1 complete: {len(live_ips)} live hosts: {live_ips}")
 
-    arp_table = get_arp_table()
+    logger.info("Step 2: Probing live hosts for Bitaxe info...")
+    bitaxes = scan_bitaxes(live_ips)
+    logger.info(f"Step 2 complete: {len(bitaxes)} Bitaxes found: {list(bitaxes.keys())}")
 
     results = []
-    for mac, ip in arp_table.items():
+    for ip, info in bitaxes.items():
+        mac = normalize_mac(info.get("macAddr", ""))
+        logger.info(f"Checking IP {ip}: mac={mac}, target_macs={target_macs}")
         if mac in target_macs:
-            logger.info(f"Found MAC {mac} at IP {ip}, verifying Bitaxe...")
-            info = verify_bitaxe(ip)
-            if info:
-                results.append({
-                    "mac": mac,
-                    "ip": ip,
-                    "info": info,
-                    "hostname": info.get("hostname", ip),
-                    "version": info.get("bitaxeVersion", "unknown")
-                })
-                logger.info(f"Confirmed Bitaxe at {ip}: {info.get('hostname', '')} v{info.get('bitaxeVersion', '')}")
-            else:
-                results.append({
-                    "mac": mac,
-                    "ip": ip,
-                    "info": None,
-                    "hostname": None,
-                    "version": None,
-                    "error": "Not a Bitaxe device"
-                })
-                logger.warning(f"Device at {ip} with MAC {mac} is not a Bitaxe")
+            logger.info(f"  ==> MATCH! Found target MAC {mac} at IP {ip}")
+            results.append({
+                "mac": mac,
+                "ip": ip,
+                "info": info,
+                "hostname": info.get("hostname", ip),
+                "version": info.get("bitaxeVersion", "unknown")
+            })
+        else:
+            logger.info(f"  ==> No match: {mac} not in target MACs")
 
     for mac in target_macs:
         if not any(r["mac"] == mac for r in results):
+            logger.info(f"MAC {mac} not found on network")
             results.append({
                 "mac": mac,
                 "ip": None,
@@ -173,4 +161,5 @@ def discover_by_macs(mac_list):
                 "error": "Not found on network"
             })
 
+    logger.info(f"=== DISCOVER BY MACS END: {len(results)} results ===")
     return {"results": results, "subnet": subnet}

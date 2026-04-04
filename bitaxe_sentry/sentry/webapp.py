@@ -280,6 +280,24 @@ def list_miners(session: Session = Depends(get_session)):
         ]
     }
 
+class MinerCreateRequest(BaseModel):
+    endpoint: str
+    name: str | None = None
+
+@app.post("/api/miners")
+def create_miner(request: MinerCreateRequest, session: Session = Depends(get_session)):
+    existing = session.exec(select(Miner).where(Miner.endpoint == request.endpoint)).first()
+    if existing:
+        return {"success": True, "miner_id": existing.id, "message": "Miner already exists"}
+
+    name = request.name or f"bitaxe_{request.endpoint.split('://')[-1]}"
+    miner = Miner(name=name, endpoint=request.endpoint)
+    session.add(miner)
+    session.commit()
+    session.refresh(miner)
+    logger.info(f"Created miner {miner.id} ({miner.name}) at {miner.endpoint}")
+    return {"success": True, "miner_id": miner.id, "name": miner.name}
+
 @app.delete("/api/miners/{miner_id}")
 def delete_miner(
     miner_id: int,
@@ -518,6 +536,10 @@ def get_notification_status(miner_id: int):
 
 class DiscoverRequest(BaseModel):
     macs: List[str]
+    auto_update: Optional[bool] = False
+
+class DiscoverPreferencesRequest(BaseModel):
+    auto_update: bool
 
 class MacUpdateRequest(BaseModel):
     mac_address: str
@@ -525,21 +547,85 @@ class MacUpdateRequest(BaseModel):
 class IpUpdateRequest(BaseModel):
     ip: str
 
+@app.put("/api/discover/preferences")
+def update_discover_preferences(req: DiscoverPreferencesRequest, session: Session = Depends(get_session)):
+    settings = load_settings()
+    settings["AUTO_UPDATE_MINER_IP"] = req.auto_update
+    success = save_settings(settings)
+    if success:
+        logger.info(f"Discover auto-update preference set to: {req.auto_update}")
+    return {"success": success, "auto_update": req.auto_update}
+
 @app.post("/api/discover")
 def discover_miners(request: DiscoverRequest, session: Session = Depends(get_session)):
     from .discovery import discover_by_macs
     
-    result = discover_by_macs(request.macs)
+    logger.info(f"=== /api/discover called: macs={request.macs}, auto_update={request.auto_update}")
+    
+    settings = load_settings()
+    auto_update = request.auto_update if request.auto_update is not None else settings.get("AUTO_UPDATE_MINER_IP", False)
+    
+    endpoints = settings.get("BITAXE_ENDPOINTS", [])
+    logger.info(f"Configured endpoints: {endpoints}")
+    
+    logger.info("Calling discover_by_macs...")
+    try:
+        result = discover_by_macs(request.macs, endpoints=endpoints)
+    except Exception as e:
+        logger.exception(f"discover_by_macs failed: {e}")
+        return {"success": False, "error": str(e)}
+    
+    logger.info(f"discover_by_macs returned: {result}")
     
     if "error" in result:
+        logger.warning(f"Discover error: {result['error']}")
         return {"success": False, "error": result["error"]}
     
+    logger.info(f"Processing {len(result.get('results', []))} results...")
     for r in result.get("results", []):
-        if r["mac"]:
+        if r.get("mac"):
             existing = session.exec(select(Miner).where(Miner.mac_address == r["mac"])).first()
             r["existing_miner_id"] = existing.id if existing else None
-            r["status"] = "existing" if existing else "new"
+            
+            logger.info(f"Result: mac={r['mac']}, ip={r.get('ip')}, existing_miner_id={r.get('existing_miner_id')}")
+            
+            if not existing:
+                r["action"] = "new"
+                logger.info(f"  -> Action: new miner")
+            elif r.get("ip"):
+                try:
+                    from urllib.parse import urlparse
+                    current_ip = urlparse(existing.endpoint).hostname
+                except Exception:
+                    current_ip = existing.endpoint.replace("http://", "").replace("https://", "").split(":")[0].split("/")[0]
+                
+                if current_ip != r["ip"] and auto_update:
+                    try:
+                        parsed = urlparse(existing.endpoint)
+                        new_endpoint = f"{parsed.scheme}://{r['ip']}"
+                    except Exception:
+                        new_endpoint = f"http://{r['ip']}"
+                    old_endpoint = existing.endpoint
+                    existing.endpoint = new_endpoint
+                    session.add(existing)
+                    session.commit()
+                    logger.info(f"  -> Action: auto_updated {existing.id} ({existing.name}): {old_endpoint} -> {new_endpoint}")
+                    r["action"] = "auto_updated"
+                    r["old_endpoint"] = old_endpoint
+                elif current_ip == r["ip"]:
+                    r["action"] = "ip_unchanged"
+                    logger.info(f"  -> Action: ip_unchanged (current={current_ip})")
+                else:
+                    r["action"] = "manual_update_needed"
+                    logger.info(f"  -> Action: manual_update_needed (current={current_ip}, found={r['ip']})")
+            else:
+                r["action"] = "manual_update_needed"
+                logger.info(f"  -> Action: manual_update_needed (no ip)")
+        else:
+            r["action"] = "unknown"
+            logger.info(f"  -> Action: unknown (no mac)")
     
+    logger.info(f"=== /api/discover complete: {len(result.get('results', []))} results ===")
     return {"success": True, "subnet": result.get("subnet"), "results": result.get("results", [])}
 
 @app.put("/api/miners/{miner_id}/mac")

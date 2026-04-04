@@ -20,7 +20,8 @@ DEFAULT_SETTINGS = {
     "VOLT_MIN": 5.0,
     "LATENCY_MAX_THRESHOLD": 500,
     "BITAXE_ENDPOINTS": [],
-    "DISCORD_WEBHOOK_URL": ""
+    "DISCORD_WEBHOOK_URL": "",
+    "AUTO_UPDATE_MINER_IP": True
 }
 
 def ensure_data_dir():

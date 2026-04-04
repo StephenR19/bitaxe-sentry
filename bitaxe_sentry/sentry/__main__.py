@@ -14,7 +14,7 @@ from .config import POLL_INTERVAL, reload_config
 from .db import init_db, engine, Miner, Reading
 from .notifier import send_startup_notification, send_ip_change_alert
 from .settings_manager import load_settings
-from .discovery import get_arp_table, ping_sweep, get_local_subnet, verify_bitaxe
+from .discovery import discover_by_macs, scan_subnet, scan_bitaxes
 
 logger = logging.getLogger(__name__)
 
@@ -78,21 +78,22 @@ def auto_heal():
     logger.info("Starting auto-heal scan for offline miners")
     
     try:
-        ping_sweep(get_local_subnet()[0])
-        arp_table = get_arp_table()
+        settings = load_settings()
+        endpoints = settings.get("BITAXE_ENDPOINTS", [])
         
-        if not arp_table:
-            logger.warning("ARP table empty, skipping auto-heal")
+        if not endpoints:
+            logger.debug("No endpoints configured, skipping auto-heal")
             return
         
-        mac_to_ip = {mac: ip for mac, ip in arp_table.items()}
+        from .discovery import parse_subnet_from_endpoints
+        subnet = parse_subnet_from_endpoints(endpoints)
         
+        miners_with_macs = []
         with Session(engine) as session:
-            miners = session.exec(select(Miner)).all()
+            all_miners = session.exec(select(Miner)).all()
             stale_threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=POLL_INTERVAL * 2)
             
-            healed = 0
-            for miner in miners:
+            for miner in all_miners:
                 if not miner.mac_address:
                     continue
                 
@@ -106,27 +107,42 @@ def auto_heal():
                 if last_reading and last_reading.timestamp > stale_threshold:
                     continue
                 
+                miners_with_macs.append(miner)
+        
+        if not miners_with_macs:
+            logger.debug("No stale miners with MAC addresses, skipping auto-heal")
+            return
+        
+        live_ips = scan_subnet(subnet)
+        bitaxes = scan_bitaxes(live_ips)
+        
+        mac_to_bitaxe = {}
+        for ip, info in bitaxes.items():
+            mac = info.get("macAddr", "").lower().replace("-", ":").strip()
+            if mac:
+                mac_to_bitaxe[mac] = {"ip": ip, "info": info}
+        
+        healed = 0
+        with Session(engine) as session:
+            for miner in miners_with_macs:
                 target_mac = miner.mac_address.lower().strip()
-                new_ip = mac_to_ip.get(target_mac)
+                bitaxe = mac_to_bitaxe.get(target_mac)
                 
-                if not new_ip:
-                    logger.debug(f"Miner {miner.name} (MAC: {target_mac}) not found in ARP table")
+                if not bitaxe:
+                    logger.debug(f"Miner {miner.name} (MAC: {target_mac}) not found on network")
                     continue
                 
+                new_ip = bitaxe["ip"]
                 try:
                     from urllib.parse import urlparse
                     parsed = urlparse(miner.endpoint)
                     current_ip = parsed.hostname
+                    current_ip = current_ip if current_ip else miner.endpoint.replace("http://", "").replace("https://", "").split(":")[0].split("/")[0]
                 except Exception:
-                    current_ip = miner.endpoint
+                    current_ip = miner.endpoint.replace("http://", "").replace("https://", "").split(":")[0].split("/")[0]
                 
                 if new_ip == current_ip:
                     logger.debug(f"Miner {miner.name} already at correct IP {new_ip}")
-                    continue
-                
-                info = verify_bitaxe(new_ip)
-                if not info:
-                    logger.warning(f"Device at {new_ip} with MAC {target_mac} is not a Bitaxe")
                     continue
                 
                 old_endpoint = miner.endpoint
@@ -143,11 +159,11 @@ def auto_heal():
                     logger.warning(f"Failed to send IP change alert for {miner.name}: {e}")
                 
                 healed += 1
-            
-            if healed > 0:
-                logger.info(f"Auto-heal complete: {healed} miner(s) recovered")
-            else:
-                logger.info("Auto-heal complete: no miners needed recovery")
+        
+        if healed > 0:
+            logger.info(f"Auto-heal complete: {healed} miner(s) recovered")
+        else:
+            logger.info("Auto-heal complete: no miners needed recovery")
                 
     except Exception as e:
         logger.exception(f"Error during auto-heal: {e}")
