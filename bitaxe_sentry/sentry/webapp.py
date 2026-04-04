@@ -9,6 +9,7 @@ import datetime
 import os
 import signal
 import subprocess
+import re
 from typing import Optional, Dict, Any, List
 import json
 from pydantic import BaseModel
@@ -255,6 +256,22 @@ def history(
         })
     )
 
+@app.get("/api/miners")
+def list_miners(session: Session = Depends(get_session)):
+    miners = session.exec(select(Miner)).all()
+    return {
+        "miners": [
+            {
+                "id": m.id,
+                "name": m.name,
+                "endpoint": m.endpoint,
+                "mac_address": m.mac_address,
+                "added_at": m.added_at.isoformat()
+            }
+            for m in miners
+        ]
+    }
+
 @app.delete("/api/miners/{miner_id}")
 def delete_miner(
     miner_id: int,
@@ -489,4 +506,73 @@ def get_notification_status(miner_id: int):
         }
     except Exception as e:
         logger.exception("Error getting notification status")
-        return {"success": False, "error": str(e)} 
+        return {"success": False, "error": str(e)}
+
+class DiscoverRequest(BaseModel):
+    macs: List[str]
+
+class MacUpdateRequest(BaseModel):
+    mac_address: str
+
+class IpUpdateRequest(BaseModel):
+    ip: str
+
+@app.post("/api/discover")
+def discover_miners(request: DiscoverRequest, session: Session = Depends(get_session)):
+    from .discovery import discover_by_macs
+    
+    result = discover_by_macs(request.macs)
+    
+    if "error" in result:
+        return {"success": False, "error": result["error"]}
+    
+    for r in result.get("results", []):
+        if r["mac"]:
+            existing = session.exec(select(Miner).where(Miner.mac_address == r["mac"])).first()
+            r["existing_miner_id"] = existing.id if existing else None
+            r["status"] = "existing" if existing else "new"
+    
+    return {"success": True, "subnet": result.get("subnet"), "results": result.get("results", [])}
+
+@app.put("/api/miners/{miner_id}/mac")
+def update_miner_mac(miner_id: int, req: MacUpdateRequest, session: Session = Depends(get_session)):
+    miner = session.get(Miner, miner_id)
+    if not miner:
+        raise HTTPException(status_code=404, detail="Miner not found")
+    
+    mac = (req.mac_address or "").strip().lower().replace("-", ":")
+    if mac and not re.match(r'^([0-9a-f]{2}:){5}[0-9a-f]{2}$', mac):
+        raise HTTPException(status_code=400, detail="Invalid MAC address format")
+    
+    old_mac = miner.mac_address
+    miner.mac_address = mac if mac else None
+    session.add(miner)
+    session.commit()
+    
+    logger.info(f"Updated MAC for miner {miner_id} ({miner.name}): {old_mac} -> {mac}")
+    return {"success": True, "miner_id": miner_id, "mac_address": miner.mac_address}
+
+@app.post("/api/miners/{miner_id}/update-ip")
+def update_miner_ip(miner_id: int, req: IpUpdateRequest, session: Session = Depends(get_session)):
+    miner = session.get(Miner, miner_id)
+    if not miner:
+        raise HTTPException(status_code=404, detail="Miner not found")
+    
+    ip = (req.ip or "").strip()
+    if not ip:
+        raise HTTPException(status_code=400, detail="IP address required")
+    
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(miner.endpoint)
+        new_endpoint = f"{parsed.scheme}://{ip}"
+    except Exception:
+        new_endpoint = f"http://{ip}"
+    
+    old_endpoint = miner.endpoint
+    miner.endpoint = new_endpoint
+    session.add(miner)
+    session.commit()
+    
+    logger.info(f"Updated IP for miner {miner_id} ({miner.name}): {old_endpoint} -> {new_endpoint}")
+    return {"success": True, "miner_id": miner_id, "old_endpoint": old_endpoint, "new_endpoint": new_endpoint} 

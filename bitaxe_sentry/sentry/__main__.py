@@ -7,12 +7,14 @@ import os
 import pathlib
 import atexit
 from apscheduler.schedulers.background import BackgroundScheduler
+from sqlmodel import Session, select
 from .poller import poll_once
 from .cleaner import clean_old
 from .config import POLL_INTERVAL, reload_config
-from .db import init_db
-from .notifier import send_startup_notification
+from .db import init_db, engine, Miner, Reading
+from .notifier import send_startup_notification, send_ip_change_alert
 from .settings_manager import load_settings
+from .discovery import get_arp_table, ping_sweep, get_local_subnet, verify_bitaxe
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,88 @@ def update_scheduler_if_needed():
             logger.warning("Scheduler not initialized, cannot update")
             current_poll_interval = POLL_INTERVAL
 
+def auto_heal():
+    """
+    Check for offline miners with stored MAC addresses and try to find them at new IPs.
+    If found, update their endpoint and send a notification.
+    """
+    logger.info("Starting auto-heal scan for offline miners")
+    
+    try:
+        ping_sweep(get_local_subnet()[0])
+        arp_table = get_arp_table()
+        
+        if not arp_table:
+            logger.warning("ARP table empty, skipping auto-heal")
+            return
+        
+        mac_to_ip = {mac: ip for mac, ip in arp_table.items()}
+        
+        with Session(engine) as session:
+            miners = session.exec(select(Miner)).all()
+            stale_threshold = datetime.datetime.utcnow() - datetime.timedelta(minutes=POLL_INTERVAL * 2)
+            
+            healed = 0
+            for miner in miners:
+                if not miner.mac_address:
+                    continue
+                
+                last_reading = session.exec(
+                    select(Reading)
+                    .where(Reading.miner_id == miner.id)
+                    .order_by(Reading.timestamp.desc())
+                    .limit(1)
+                ).first()
+                
+                if last_reading and last_reading.timestamp > stale_threshold:
+                    continue
+                
+                target_mac = miner.mac_address.lower().strip()
+                new_ip = mac_to_ip.get(target_mac)
+                
+                if not new_ip:
+                    logger.debug(f"Miner {miner.name} (MAC: {target_mac}) not found in ARP table")
+                    continue
+                
+                try:
+                    from urllib.parse import urlparse
+                    parsed = urlparse(miner.endpoint)
+                    current_ip = parsed.hostname
+                except Exception:
+                    current_ip = miner.endpoint
+                
+                if new_ip == current_ip:
+                    logger.debug(f"Miner {miner.name} already at correct IP {new_ip}")
+                    continue
+                
+                info = verify_bitaxe(new_ip)
+                if not info:
+                    logger.warning(f"Device at {new_ip} with MAC {target_mac} is not a Bitaxe")
+                    continue
+                
+                old_endpoint = miner.endpoint
+                new_endpoint = f"{parsed.scheme}://{new_ip}"
+                miner.endpoint = new_endpoint
+                session.add(miner)
+                session.commit()
+                
+                logger.info(f"Auto-healed {miner.name}: {old_endpoint} -> {new_endpoint}")
+                
+                try:
+                    send_ip_change_alert(miner, old_endpoint, new_endpoint)
+                except Exception as e:
+                    logger.warning(f"Failed to send IP change alert for {miner.name}: {e}")
+                
+                healed += 1
+            
+            if healed > 0:
+                logger.info(f"Auto-heal complete: {healed} miner(s) recovered")
+            else:
+                logger.info("Auto-heal complete: no miners needed recovery")
+                
+    except Exception as e:
+        logger.exception(f"Error during auto-heal: {e}")
+
 def main():
     """Main entry point for the Bitaxe Sentry application."""
     logger.info("Starting Bitaxe Sentry")
@@ -101,6 +185,7 @@ def main():
         id='poller'
     )
     scheduler.add_job(clean_old, 'cron', hour=0, id='cleaner')
+    scheduler.add_job(auto_heal, 'interval', minutes=10, id='auto_heal', misfire_grace_time=600)
     
     # Start the scheduler
     scheduler.start()

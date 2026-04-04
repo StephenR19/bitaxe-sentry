@@ -26,6 +26,7 @@ class Miner(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
     name: str
     endpoint: str
+    mac_address: str | None = Field(default=None)
     added_at: datetime.datetime = Field(default_factory=datetime.datetime.utcnow)
 
 

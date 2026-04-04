@@ -13,6 +13,9 @@ services:
       - VOLT_MIN=${VOLT_MIN:-5.0}
       - BITAXE_ENDPOINTS=${BITAXE_ENDPOINTS:-}
       - DISCORD_WEBHOOK_URL=${DISCORD_WEBHOOK_URL:-}
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
     restart: always
 
   web:
