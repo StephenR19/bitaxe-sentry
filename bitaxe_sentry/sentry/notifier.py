@@ -411,13 +411,14 @@ def send_miner_offline_alert(miner):
         logger.error(f"Failed to send offline alert: {e}")
         return False
 
-def send_latency_alert(miner, reading):
+def send_latency_alert(miner, reading, consecutive_count=1):
     """
     Send high pool latency alert via Discord webhook.
     
     Args:
         miner: The miner instance
         reading: Reading instance with response_time data
+        consecutive_count: Number of consecutive high latency readings that triggered the alert
         
     Returns:
         bool: True if notification was sent successfully, False otherwise
@@ -438,7 +439,7 @@ def send_latency_alert(miner, reading):
     logger.info(f"Preparing to send latency alert for {miner.name} via webhook: {DISCORD_WEBHOOK[:20]}...")
     
     content = (
-      f"⚠️ **{miner.name}** high pool latency detected\n"
+      f"⚠️ **{miner.name}** high pool latency detected ({consecutive_count} consecutive)\n"
       f"Pool Latency: {reading.response_time:.2f}ms (threshold: {LATENCY_MAX_THRESHOLD}ms)\n"
       f"This may indicate network issues or pool connectivity problems."
     )

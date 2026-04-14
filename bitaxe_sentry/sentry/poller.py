@@ -4,11 +4,13 @@ import logging
 import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlmodel import Session, select
-from .config import ENDPOINTS, TEMP_MAX, TEMP_MIN, VOLT_MIN, LATENCY_MAX_THRESHOLD, reload_config
+from .config import ENDPOINTS, TEMP_MAX, TEMP_MIN, VOLT_MIN, LATENCY_MAX_THRESHOLD, LATENCY_CONSECUTIVE_COUNT, reload_config
 from .db import engine, Miner, Reading
 from .notifier import send_temperature_alert, send_voltage_alert, send_diff_alert, send_miner_offline_alert, send_latency_alert
 
 logger = logging.getLogger(__name__)
+
+consecutive_latency_failures: dict[int, int] = {}
 
 def poll_endpoint(endpoint_url):
     """
@@ -186,16 +188,22 @@ def poll_once():
             else:
                 logger.info(f"Voltage OK for {miner.name}: {r.voltage}V (min: {VOLT_MIN}V)")
             
-            # Latency alerts - check if response time exceeds threshold
-            if r.response_time is not None and r.response_time > LATENCY_MAX_THRESHOLD:
-                logger.warning(f"Pool latency above threshold for {miner.name}: {r.response_time}ms (threshold: {LATENCY_MAX_THRESHOLD}ms)")
-                try:
-                    send_latency_alert(miner, r)
-                    logger.info(f"Latency alert sent for {miner.name}")
-                except Exception as e:
-                    logger.exception(f"Failed to send latency alert for {miner.name}: {e}")
-            else:
-                if r.response_time is not None:
+            # Latency alerts - check for consecutive high latency readings
+            if r.response_time is not None:
+                if r.response_time > LATENCY_MAX_THRESHOLD:
+                    consecutive_latency_failures[miner.id] = consecutive_latency_failures.get(miner.id, 0) + 1
+                    logger.warning(f"Pool latency above threshold for {miner.name}: {r.response_time}ms (threshold: {LATENCY_MAX_THRESHOLD}ms) [consecutive: {consecutive_latency_failures[miner.id]}]")
+                    if consecutive_latency_failures[miner.id] >= LATENCY_CONSECUTIVE_COUNT:
+                        try:
+                            send_latency_alert(miner, r, consecutive_latency_failures[miner.id])
+                            logger.info(f"Latency alert sent for {miner.name}")
+                        except Exception as e:
+                            logger.exception(f"Failed to send latency alert for {miner.name}: {e}")
+                        consecutive_latency_failures[miner.id] = 0
+                else:
+                    if miner.id in consecutive_latency_failures:
+                        logger.info(f"Pool latency returned to normal for {miner.name}, resetting consecutive failure count from {consecutive_latency_failures[miner.id]}")
+                    consecutive_latency_failures[miner.id] = 0
                     logger.info(f"Pool latency OK for {miner.name}: {r.response_time}ms (threshold: {LATENCY_MAX_THRESHOLD}ms)")
             
             # New best diff check
