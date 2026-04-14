@@ -13,10 +13,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy app code before switching users
 COPY bitaxe_sentry /app/bitaxe_sentry
 
-# Clear any Python bytecode cache that may have been copied
-RUN find /app -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true && \
-    find /app -name "*.pyc" -delete 2>/dev/null || true
-
 # Copy Alembic configuration and migrations
 COPY alembic.ini /app/alembic.ini
 COPY alembic /app/alembic
